@@ -27,44 +27,6 @@ __global__ void kinetic_propagation_kernel(cufftDoubleComplex* psi, const double
     }
 }
 
-// CUDA kernel to calculate the norm of the wave function
-__global__ void calculate_norm_kernel(cufftDoubleComplex* psi, double* norm, int NX) {
-    __shared__ double cache[256];
-    int idx = threadIdx.x + blockIdx.x * blockDim.x;
-    int cacheIdx = threadIdx.x;
-
-    double temp = 0.0;
-    while (idx < NX) {
-        temp += psi[idx].x * psi[idx].x + psi[idx].y * psi[idx].y;
-        idx += blockDim.x * gridDim.x;
-    }
-
-    cache[cacheIdx] = temp;
-    __syncthreads();
-
-    int i = blockDim.x / 2;
-    while (i != 0) {
-        if (cacheIdx < i) {
-            cache[cacheIdx] += cache[cacheIdx + i];
-        }
-        __syncthreads();
-        i /= 2;
-    }
-
-    if (cacheIdx == 0) {
-        atomicAdd(norm, cache[0]);
-    }
-}
-
-// CUDA kernel to normalize the wave function
-__global__ void normalize_wave_function_kernel(cufftDoubleComplex* psi, double norm, int NX) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < NX) {
-        psi[idx].x /= norm;
-        psi[idx].y /= norm;
-    }
-}
-
 void initialize_wave_function(cufftDoubleComplex* h_psi, double X0, double S0, double E0, int NX, double dx) {
     double norm = 0.0;
     for (int i = 0; i < NX; ++i) {
@@ -175,11 +137,10 @@ int main(int argc, char* argv[]) {
 
     // Device arrays
     cufftDoubleComplex* d_psi;
-    double* d_potential, * d_kinetic_operator, * d_norm;
+    double* d_potential, * d_kinetic_operator;
     cudaMalloc((void**)&d_psi, sizeof(cufftDoubleComplex) * NX);
     cudaMalloc((void**)&d_potential, sizeof(double) * NX);
     cudaMalloc((void**)&d_kinetic_operator, sizeof(double) * NX);
-    cudaMalloc((void**)&d_norm, sizeof(double));
 
     // Copy data to device
     cudaMemcpy(d_psi, h_psi, sizeof(cufftDoubleComplex) * NX, cudaMemcpyHostToDevice);
@@ -196,7 +157,7 @@ int main(int argc, char* argv[]) {
 
     // Run simulation
     int numBlocks = (NX + BLOCK_SIZE - 1) / BLOCK_SIZE;
-    for (int step = 0; step < 10000; ++step) {
+    for (int step = 0; step < 100000; ++step) {
         // Step 1: Half-step potential propagation in real space
         potential_propagation_kernel <<<numBlocks, BLOCK_SIZE >>> (d_psi, d_potential, DT, NX);
 
@@ -212,23 +173,6 @@ int main(int argc, char* argv[]) {
         // Step 5: Half-step potential propagation in real space again
         potential_propagation_kernel <<<numBlocks, BLOCK_SIZE >>> (d_psi, d_potential, DT, NX);
 
-        // Step 6: Normalize the wave function on the GPU
-        cudaMemset(d_norm, 0, sizeof(double));
-        calculate_norm_kernel <<<numBlocks, BLOCK_SIZE >>> (d_psi, d_norm, NX);
-        cudaDeviceSynchronize();
-
-        double h_norm;
-        cudaMemcpy(&h_norm, d_norm, sizeof(double), cudaMemcpyDeviceToHost);
-        h_norm = sqrt(h_norm * dx);
-
-        if (h_norm > 0) {
-            normalize_wave_function_kernel <<<numBlocks, BLOCK_SIZE >>> (d_psi, h_norm, NX);
-            cudaDeviceSynchronize();
-        }
-        else {
-            fprintf(stderr, "Warning: Norm is zero, cannot normalize the wave function\n");
-        }
-
         // Output results every 200 steps
         if (step % 200 == 0) {
             cudaMemcpy(h_psi, d_psi, sizeof(cufftDoubleComplex) * NX, cudaMemcpyDeviceToHost);
@@ -242,13 +186,13 @@ int main(int argc, char* argv[]) {
     cudaFree(d_psi);
     cudaFree(d_potential);
     cudaFree(d_kinetic_operator);
-    cudaFree(d_norm);
     free(h_psi);
     free(h_potential);
     free(h_kinetic_operator);
 
     return 0;
 }
+
 
 
 
